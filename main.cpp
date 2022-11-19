@@ -4,12 +4,13 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <fstream>
-
+#include <nlohmann/json.hpp>
 #include <osmium/geom/haversine.hpp>
 #include <osmium/handler/node_locations_for_ways.hpp>
 #include <osmium/index/map/flex_mem.hpp>
 #include <osmium/io/any_input.hpp>
 #include <osmium/visitor.hpp>
+#include <osmium/util/progress_bar.hpp>
 
 struct Coordinate {
   double x{};
@@ -43,6 +44,7 @@ struct ProposedChange {
     ObjectID node_id;
     Coordinate node_coordinate;
     Direction direction;
+    double vis_bearing_deg{};
 };
 
 struct DataCollector : public osmium::handler::Handler {
@@ -169,18 +171,37 @@ std::vector<ProposedChange> GenerateChanges(const DataCollector &data) {
 }
 
 void RenderChangesToGeoJSON(const std::vector<ProposedChange>& changes, const std::string& filename) {
+    using json = nlohmann::json;
     std::ofstream file(filename);
-    file << R"({"type": "FeatureCollection", "features": [)";
-    bool first = true;
+
     for (const auto& change : changes) {
-        if (!first) {
-            file << ",";
-        }
-        first = false;
-        file << std::setprecision(20);
-        file << R"({"type": "Feature", "geometry": {"type": "Point", "coordinates": [)" << change.node_coordinate.x << "," << change.node_coordinate.y << R"(]}, "properties": {"id": ")" << std::to_string(change.node_id) << R"("}})";
+        json j_change;
+        j_change["type"] = "FeatureCollection";
+        j_change["features"] = json::array();
+
+        json j_stop_sign;
+        j_stop_sign["type"] = "Feature";
+        j_stop_sign["geometry"] = json::object();
+        j_stop_sign["geometry"]["type"] = "Point";
+        j_stop_sign["geometry"]["coordinates"] = json::array();
+        j_stop_sign["geometry"]["coordinates"][0] = change.node_coordinate.x;
+        j_stop_sign["geometry"]["coordinates"][1] = change.node_coordinate.y;
+        j_stop_sign["properties"] = json::object();
+        j_stop_sign["properties"]["osmid"] = change.node_id;
+        j_stop_sign["properties"]["direction"] = change.direction == Direction::Forward ? "forward" : "backward";
+        j_change["features"].push_back(j_stop_sign);
+  
+        json j_cooperative_work = json::array();
+        json j_set_tag;
+        j_set_tag["setTags"] = json::object();
+        j_set_tag["setTags"]["direction"] = change.direction == Direction::Forward ? "forward" : "backward";
+        j_cooperative_work.emplace_back(std::move(j_set_tag));
+
+        j_change["cooperativeWork"] = std::move(j_cooperative_work);
+
+        constexpr char RS = static_cast<char>(0x1E);
+        file << RS << j_change.dump() << '\n';
     }
-    file << "]}";
 }
 
 int main(int argc, char *argv[]) {
@@ -192,6 +213,7 @@ int main(int argc, char *argv[]) {
   try {
     osmium::io::Reader reader{argv[1], osmium::osm_entity_bits::node |
                                            osmium::osm_entity_bits::way};
+    osmium::ProgressBar progress{reader.file_size(), osmium::isatty(2)};
 
     using Index = osmium::index::map::FlexMem<osmium::unsigned_object_id_type,
                                               osmium::Location>;
@@ -202,7 +224,14 @@ int main(int argc, char *argv[]) {
 
     DataCollector data_collector;
 
-    osmium::apply(reader, location_handler, data_collector);
+    while (osmium::memory::Buffer buffer = reader.read()) {
+        osmium::apply(buffer, location_handler, data_collector);
+        progress.update(reader.offset());
+    }
+
+    progress.done();
+
+    
     auto changes = GenerateChanges(data_collector);
     RenderChangesToGeoJSON(changes, "changes.geojson");
   } catch (const std::exception &e) {
