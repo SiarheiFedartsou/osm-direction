@@ -1,0 +1,10 @@
+project (osm-direction)
+set(CMAKE_CXX_STANDARD 20)
+
+find_package(EXPAT REQUIRED)
+find_package(BZip2 REQUIRED)
+find_package(ZLIB REQUIRED)
+include_directories(SYSTEM protozero/include)
+include_directories(SYSTEM libosmium/include)
+add_executable(osm-direction main.cpp)
+target_link_libraries(osm-direction ${EXPAT_LIBRARIES} ${BZIP2_LIBRARIES} ${ZLIB_LIBRARIES})
