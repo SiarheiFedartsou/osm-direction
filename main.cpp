@@ -12,6 +12,9 @@
 #include <osmium/visitor.hpp>
 #include <osmium/util/progress_bar.hpp>
 
+using json = nlohmann::json;
+using ObjectID = unsigned long long;
+
 struct Coordinate {
   double x{};
   double y{};
@@ -21,7 +24,6 @@ struct Coordinate {
   }
 };
 
-using ObjectID = unsigned long long;
 
 struct WayNode {
   ObjectID id;
@@ -89,6 +91,44 @@ struct DataCollector : public osmium::handler::Handler {
   std::vector<Way> ways_with_stop_signs;
 };
 
+double Bearing(const Coordinate &from, const Coordinate &to) {
+    double lat1 = from.y * M_PI / 180;
+    double lat2 = to.y * M_PI / 180;
+    double lon1 = from.x * M_PI / 180;
+    double lon2 = to.x * M_PI / 180;
+    double y = sin(lon2 - lon1) * cos(lat2);
+    double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(lon2 - lon1);
+    double bearing = atan2(y, x) * 180 / M_PI;
+    if (bearing < 0) {
+        bearing += 360;
+    }
+    return bearing;
+}
+
+double BearingAtStopSign(const std::vector<WayNode>& nodes, int index, Direction direction) {
+    Coordinate start;
+    Coordinate end;
+    if (direction == Direction::Forward) {
+        if (index == 0) {
+            start = nodes[index + 1].coordinate;
+            end = nodes[index].coordinate;
+        } else {
+            start = nodes[index].coordinate;
+            end = nodes[index - 1].coordinate;
+        }
+    } else {
+        if (index == nodes.size() - 1) {
+            start = nodes[index - 1].coordinate;
+            end = nodes[index].coordinate;
+        } else {
+            start = nodes[index].coordinate;
+            end = nodes[index + 1].coordinate;
+        }
+    }
+    return Bearing(start, end);
+}
+
+
 std::vector<ProposedChange> GenerateChanges(const DataCollector &data) {
   std::vector<ProposedChange> changes;
   for (const auto &way : data.ways_with_stop_signs) {
@@ -98,6 +138,10 @@ std::vector<ProposedChange> GenerateChanges(const DataCollector &data) {
       bool after_stop_sign = false;
       ObjectID current_stop_sign = 0;
       Coordinate current_stop_sign_coordinate;
+      size_t stop_sign_index = 0;
+      Coordinate coordinate_before_stop_sign;
+      Coordinate coordinate_after_stop_sign;
+
       double distance_to_prev_intersection = 0;
 
       // TODO: what if there is no intersection before/after the stop sign?
@@ -115,6 +159,7 @@ std::vector<ProposedChange> GenerateChanges(const DataCollector &data) {
             !is_intersection && data.stop_signs.contains(node.id);
         if (is_stop_sign) {
           after_stop_sign = true;
+          stop_sign_index = 0;
           current_stop_sign = node.id;
           current_stop_sign_coordinate = node.coordinate;
           distance_to_prev_intersection =
@@ -135,6 +180,8 @@ std::vector<ProposedChange> GenerateChanges(const DataCollector &data) {
             } else {
               change.direction = Direction::Backward;
             }
+            change.vis_bearing_deg = BearingAtStopSign(way.nodes, stop_sign_index, change.direction);
+
             after_stop_sign = false;
             distance_from_intersection_or_stop_sign = 0;
             changes.push_back(change);
@@ -160,6 +207,8 @@ std::vector<ProposedChange> GenerateChanges(const DataCollector &data) {
                 } else {
                     assert(false && "unreachable");
                 }
+                change.vis_bearing_deg = BearingAtStopSign(way.nodes, index, change.direction);
+            
                 changes.push_back(change);
             }
         }
@@ -168,14 +217,47 @@ std::vector<ProposedChange> GenerateChanges(const DataCollector &data) {
   return changes;
 }
 
+
+// translate coordinate by bearing and distance
+Coordinate Destination(const Coordinate &from, double bearing, double distance) {
+    double lat1 = from.y * M_PI / 180;
+    double lon1 = from.x * M_PI / 180;
+    double bearing_rad = bearing * M_PI / 180;
+    double lat2 = asin(sin(lat1) * cos(distance) + cos(lat1) * sin(distance) * cos(bearing_rad));
+    double lon2 = lon1 + atan2(sin(bearing_rad) * sin(distance) * cos(lat1), cos(distance) - sin(lat1) * sin(lat2));
+    return {lon2 * 180 / M_PI, lat2 * 180 / M_PI};
+}
+
+json RenderDirectionPolygon(const Coordinate& origin, double bearing) {
+    json polygon;
+    polygon["type"] = "Polygon";
+    json coordinates;
+    coordinates.push_back({origin.x, origin.y});
+    coordinates.push_back({Destination(origin, bearing + 30, 0.000001).x, Destination(origin, bearing + 30, 0.000001).y});
+    coordinates.push_back({Destination(origin, bearing - 30, 0.000001).x, Destination(origin, bearing - 30, 0.000001).y});
+    coordinates.push_back({origin.x, origin.y});
+   
+     // coordinates.push_back({Destination(origin, bearing + 90, 0.0001).x, Destination(origin, bearing + 90, 0.0001).y});
+    // coordinates.push_back({Destination(origin, bearing + 180, 0.0001).x, Destination(origin, bearing + 180, 0.0001).y});
+    // coordinates.push_back({Destination(origin, bearing + 270, 0.0001).x, Destination(origin, bearing + 270, 0.0001).y});
+    polygon["coordinates"] = json::array({coordinates});
+
+    json feature;
+    feature["type"] = "Feature";
+    feature["geometry"] = polygon;
+    feature["properties"] = json::object();
+    return feature;
+}
+
 void RenderChangesToGeoJSON(const std::vector<ProposedChange>& changes, const std::string& filename) {
-    using json = nlohmann::json;
     std::ofstream file(filename);
 
     for (const auto& change : changes) {
         json j_change;
         j_change["type"] = "FeatureCollection";
         j_change["features"] = json::array();
+
+        j_change["features"].emplace_back(RenderDirectionPolygon(change.node_coordinate, change.vis_bearing_deg));
 
         json j_stop_sign;
         j_stop_sign["type"] = "Feature";
@@ -185,7 +267,9 @@ void RenderChangesToGeoJSON(const std::vector<ProposedChange>& changes, const st
         j_stop_sign["geometry"]["coordinates"][0] = change.node_coordinate.x;
         j_stop_sign["geometry"]["coordinates"][1] = change.node_coordinate.y;
         j_stop_sign["properties"] = json::object();
+        j_stop_sign["properties"]["marker-color"] = "#ff0000";
         j_stop_sign["properties"]["osmid"] = change.node_id;
+        j_stop_sign["properties"]["bearing"] = std::to_string(change.vis_bearing_deg); 
         j_stop_sign["properties"]["direction"] = change.direction == Direction::Forward ? "forward" : "backward";
         j_change["features"].push_back(j_stop_sign);
   
