@@ -48,8 +48,6 @@ struct ProposedChange {
 };
 
 struct DataCollector : public osmium::handler::Handler {
-
-
   void way(const osmium::Way &way) {
     bool has_stop_sign = false;
 
@@ -191,11 +189,24 @@ void RenderChangesToGeoJSON(const std::vector<ProposedChange>& changes, const st
         j_stop_sign["properties"]["direction"] = change.direction == Direction::Forward ? "forward" : "backward";
         j_change["features"].push_back(j_stop_sign);
   
-        json j_cooperative_work = json::array();
-        json j_set_tag;
-        j_set_tag["setTags"] = json::object();
-        j_set_tag["setTags"]["direction"] = change.direction == Direction::Forward ? "forward" : "backward";
-        j_cooperative_work.emplace_back(std::move(j_set_tag));
+        json j_cooperative_work = json::object();
+        j_cooperative_work["meta"] = json::object();
+        j_cooperative_work["meta"]["version"] = 2;
+        j_cooperative_work["meta"]["type"] = 1;
+            
+        json j_operation = json::object();
+        j_operation["operationType"] = "modifyElement";
+        j_operation["data"] = json::object();
+        j_operation["data"]["id"] = "node/" + std::to_string(change.node_id);
+        j_operation["data"]["operations"] = json::array();
+        j_operation["data"]["operations"].push_back(json::object());
+        j_operation["data"]["operations"][0]["operation"] = "setTags";
+        j_operation["data"]["operations"][0]["data"] = json::object();
+        j_operation["data"]["operations"][0]["data"]["direction"] = change.direction == Direction::Forward ? "forward" : "backward";
+
+
+        j_cooperative_work["operations"] = json::array();
+        j_cooperative_work["operations"].push_back(j_operation);
 
         j_change["cooperativeWork"] = std::move(j_cooperative_work);
 
