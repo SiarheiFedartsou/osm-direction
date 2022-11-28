@@ -228,19 +228,38 @@ Coordinate Destination(const Coordinate &from, double bearing, double distance) 
     return {lon2 * 180 / M_PI, lat2 * 180 / M_PI};
 }
 
+void Rewind(std::vector<Coordinate>& polygon) {
+    double area = 0.0;
+    double err = 0.0;
+    for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        double k = (polygon[i].x - polygon[j].x) * (polygon[j].y + polygon[i].y);
+        double m = area + k;
+        err += std::abs(area) >= std::abs(k) ? area - m + k : k - m + area;
+        area = m;
+    }
+    if (area + err >= 0) {
+        std::reverse(polygon.begin(), polygon.end());
+    }
+}
+
 json RenderDirectionPolygon(const Coordinate& origin, double bearing) {
     json polygon;
     polygon["type"] = "Polygon";
-    json coordinates;
+    std::vector<Coordinate> coordinates;
     coordinates.push_back({origin.x, origin.y});
     coordinates.push_back({Destination(origin, bearing + 30, 0.000001).x, Destination(origin, bearing + 30, 0.000001).y});
     coordinates.push_back({Destination(origin, bearing - 30, 0.000001).x, Destination(origin, bearing - 30, 0.000001).y});
     coordinates.push_back({origin.x, origin.y});
-   
+    Rewind(coordinates);
+
+    json j_coordinates;
+    for (const auto& coordinate : coordinates) {
+        j_coordinates.push_back({coordinate.x, coordinate.y});
+    }
      // coordinates.push_back({Destination(origin, bearing + 90, 0.0001).x, Destination(origin, bearing + 90, 0.0001).y});
     // coordinates.push_back({Destination(origin, bearing + 180, 0.0001).x, Destination(origin, bearing + 180, 0.0001).y});
     // coordinates.push_back({Destination(origin, bearing + 270, 0.0001).x, Destination(origin, bearing + 270, 0.0001).y});
-    polygon["coordinates"] = json::array({coordinates});
+    polygon["coordinates"] = json::array({j_coordinates});
 
     json feature;
     feature["type"] = "Feature";
